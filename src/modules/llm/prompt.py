@@ -9,6 +9,7 @@ the tokenizer through ``load_qwen_tokenizer`` so the ``<scene>`` id is identical
 sides.
 """
 
+import torch
 from transformers import AutoTokenizer
 
 SCENE_TOKEN = "<scene>"
@@ -58,24 +59,30 @@ def build_input_and_labels(tokenizer, situation, question, answer=None,
     """
     messages = build_sqa3d_messages(situation, question, system_prompt)
 
-    # Prompt portion ends right before the assistant turn (generation prompt appended).
-    prompt_ids = tokenizer.apply_chat_template(
-        messages, tokenize=True, add_generation_prompt=True,
+    # Render the chat template to text first (version-robust), then tokenize. The template
+    # already inserts special tokens, so add_special_tokens=False. The registered <scene>
+    # special token is still recognized inside the rendered string and maps to its single id.
+    prompt_text = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True,
     )
+    prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
 
     if answer is None:
         input_ids = list(prompt_ids)
         labels = None
     else:
         full_messages = messages + [{"role": "assistant", "content": answer.strip()}]
-        full_ids = tokenizer.apply_chat_template(
-            full_messages, tokenize=True, add_generation_prompt=False,
+        full_text = tokenizer.apply_chat_template(
+            full_messages, tokenize=False, add_generation_prompt=False,
         )
+        full_ids = tokenizer(full_text, add_special_tokens=False)["input_ids"]
         input_ids = list(full_ids)
-        labels = [IGNORE_INDEX] * len(prompt_ids) + list(full_ids[len(prompt_ids):])
-        # Guard against a degenerate template where prompt is not a strict prefix.
-        if len(labels) != len(input_ids):
-            labels = [IGNORE_INDEX] * len(input_ids)
+        # Supervise only the answer tokens (everything after the prompt prefix).
+        n_prompt = len(prompt_ids)
+        if full_ids[:n_prompt] != list(prompt_ids):
+            # Tokenization boundary mismatch (rare): fall back to masking the prompt length.
+            n_prompt = min(n_prompt, len(full_ids))
+        labels = [IGNORE_INDEX] * n_prompt + list(full_ids[n_prompt:])
 
     if max_len is not None and len(input_ids) > max_len:
         # Truncate from the left but never drop the <scene> token.
@@ -90,7 +97,6 @@ def build_input_and_labels(tokenizer, situation, question, answer=None,
                 labels = labels[-max_len:]
         input_ids = keep
 
-    import torch
     out = {"input_ids": torch.tensor(input_ids, dtype=torch.long)}
     out["labels"] = None if labels is None else torch.tensor(labels, dtype=torch.long)
     return out
