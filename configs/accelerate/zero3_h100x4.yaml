@@ -1,12 +1,14 @@
 # Accelerate + DeepSpeed ZeRO-3 config for 4x H100 (full fine-tune of Qwen3.5-4B).
 # Used by scripts/vqa3d/sqa3d_llm.sh via `accelerate launch --config_file`.
+#
+# When a deepspeed_config_file is provided, all DeepSpeed/precision settings (bf16,
+# zero stage, grad accumulation/clipping, micro batch) MUST live in that JSON, not here,
+# otherwise Accelerate raises "these accelerate config variables will be ignored".
 compute_environment: LOCAL_MACHINE
 debug: false
 distributed_type: DEEPSPEED
-downcast_bf16: 'no'
 machine_rank: 0
 main_training_function: main
-mixed_precision: bf16
 num_machines: 1
 num_processes: 4
 rdzv_backend: static
