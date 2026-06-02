@@ -1,0 +1,97 @@
+# UniScene3D-LLM finetune on SQA3D (generative, Qwen3.5-4B full fine-tune).
+# See src/model/uniscene3d_llm.py for the architecture.
+
+name: "SQA3D_LLM"
+rng_seed: 42
+num_gpu: 4
+mode: "train"
+note: ""
+naming_keywords: ["dataloader.batchsize", "task", "note", "time"]
+base_dir: "results"
+exp_dir: ""
+
+resume: False
+
+# Fixed number of views per scene -> 32 * 196 = 6272 visual tokens (Identity reducer).
+num_views: 32
+
+debug:
+  flag: False
+  hard_debug: False
+  debug_size: 20
+
+logger:
+  name: "wandb"
+  entity: "yem"
+
+# dataset details
+data:
+  train: ['ScanNetSQA3D']
+  val: ['ScanNetSQA3D']
+  test: ['ScanNetSQA3D']
+  ScanNetSQA3D:
+    train:
+      use_unanswer: True
+    val:
+      use_unanswer: True
+    test:
+      use_unanswer: True
+  scan_family_base: "dataset/ScanNet"
+
+task: 'SQA3D'
+data_wrapper:
+  train: 'ScanFamilyDatasetWrapperLLM'
+  val: 'ScanFamilyDatasetWrapperLLM'
+  test: 'ScanFamilyDatasetWrapperLLM'
+
+# Training details
+trainer: "LLMTrainer"
+pretrain_ckpt_path: "results/sceneverse_scannet_exp1_b16_Pretrain_all_scannet_training_run1/cur_best_v1/ckpt/ckpt_15.pth"
+
+# dataloader details (per-GPU micro-batch; effective batch = batchsize * grad_accum * num_gpu)
+dataloader:
+  batchsize: 1
+  batchsize_eval: 1
+  num_workers: 4
+
+solver:
+  gradient_accumulation_steps: 8
+  epochs_per_save: 1
+  epochs_per_eval: 1
+  lr: 2e-5
+  grad_norm: 1.0
+  epochs: 3
+  optim:
+    name: "AdamW"
+    args:
+      betas: [0.9, 0.98]
+  sched:
+    name: "warmup_cosine"
+    args:
+      warmup_steps: 500
+
+eval:
+  name: "SQA3DLLMEval"
+  save: True
+
+# Model details
+model:
+  name: UniScene3DLLM
+  vision_feature: "projected"   # projected(512, default) | penultimate(768)
+  coord_frame: "world"          # world | ego
+  pos_embed:
+    max_freq: 64.0
+  reducer:
+    name: "Identity"            # Identity | (future) Voxel / PixelShuffle / FPS / QFormer
+  projector:
+    depth: 2
+    hidden_dim: null            # defaults to LLM hidden size
+  llm:
+    model_id: "Qwen/Qwen3.5-4B"
+    max_txt_len: 256
+    max_new_tokens: 32
+    torch_dtype: "bfloat16"
+    attn_implementation: "sdpa"   # set "flash_attention_2" if installed
+    gradient_checkpointing: True
+  loss_list: ["lm_loss"]
+  vis_loss_list: ["lm_loss"]

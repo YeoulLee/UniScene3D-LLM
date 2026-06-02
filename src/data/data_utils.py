@@ -159,6 +159,36 @@ class SQA3DAnswer(object):
         return len(self.vocab)
 
 
+def quat_to_yaw(rotation):
+    """Convert an SQA3D agent rotation to a yaw angle (radians) about the up-axis.
+
+    Accepts a quaternion as a dict ({_x,_y,_z,_w} or {x,y,z,w}) or a 4-iterable [x,y,z,w].
+    Returns 0.0 if the rotation is missing/unparseable. SQA3D agents are floor-bound, so a
+    single yaw about the vertical (z) axis captures the heading.
+
+    NOTE (verify with real data): this assumes the quaternion encodes a z-axis rotation in
+    the same world frame as the point map. Confirm field names/axis convention once the
+    dataset is downloaded; the world-frame baseline does not use this value.
+    """
+    import math
+
+    if rotation is None:
+        return 0.0
+    if isinstance(rotation, dict):
+        x = rotation.get("_x", rotation.get("x", 0.0))
+        y = rotation.get("_y", rotation.get("y", 0.0))
+        z = rotation.get("_z", rotation.get("z", 0.0))
+        w = rotation.get("_w", rotation.get("w", 1.0))
+    else:
+        try:
+            x, y, z, w = rotation
+        except (TypeError, ValueError):
+            return 0.0
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return float(math.atan2(siny_cosp, cosy_cosp))
+
+
 def get_sqa_question_type(question):
     """Map an SQA question prefix to a small question-type id."""
     question = question.lstrip()

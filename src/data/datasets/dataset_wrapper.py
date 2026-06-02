@@ -8,6 +8,13 @@ from fvcore.common.registry import Registry
 from transformers import AutoImageProcessor, AutoTokenizer
 from torch.utils.data import Dataset
 
+from modules.llm.prompt import (
+    IGNORE_INDEX,
+    load_qwen_tokenizer,
+    build_input_and_labels,
+    DEFAULT_SYSTEM_PROMPT,
+)
+
 
 DATASETWRAPPER_REGISTRY = Registry("dataset_wrapper")
 DATASETWRAPPER_REGISTRY.__doc__ = """ """
@@ -166,4 +173,113 @@ class ScanFamilyDatasetWrapperQA(Dataset):
                 collated[key] = torch.stack([value.contiguous().clone() for value in values], dim=0)
             else:
                 collated[key] = values
+        return collated
+
+
+@DATASETWRAPPER_REGISTRY.register()
+class ScanFamilyDatasetWrapperLLM(Dataset):
+    """Wrap QA samples for the generative LLM path.
+
+    Produces processed multi-view images + point maps, and a Qwen chat-template token
+    sequence with a single <scene> placeholder. Training builds answer-only labels;
+    validation/test build a prompt-only sequence (the model generates the answer).
+    """
+
+    def __init__(self, cfg, dataset, split="train"):
+        self.dataset = dataset
+        self.split = split
+        self.is_train = (split == "train")
+        self.num_views = cfg.get("num_views", 32)
+
+        model_root = str(Path(__file__).resolve().parents[2] / "fg-clip")
+        self.image_processor = AutoImageProcessor.from_pretrained(model_root)
+
+        llm_cfg = cfg.model.get("llm", {})
+        self.tokenizer, self.scene_token_id = load_qwen_tokenizer(llm_cfg.get("model_id", "Qwen/Qwen3.5-4B"))
+        self.max_txt_len = int(llm_cfg.get("max_txt_len", 256))
+        self.system_prompt = llm_cfg.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
+        self.pad_token_id = self.tokenizer.pad_token_id
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def _build_view_indices(self, num_views):
+        if num_views == self.num_views:
+            return torch.arange(num_views)
+        if num_views > self.num_views:
+            return torch.randperm(num_views)[:self.num_views]
+        pad_indices = torch.randint(0, num_views, (self.num_views - num_views,))
+        return torch.cat([torch.arange(num_views), pad_indices], dim=0)
+
+    def __getitem__(self, idx):
+        base = self.dataset[idx]
+
+        # --- views: sample/pad images + point maps to a fixed count, process images to 224.
+        view_indices = self._build_view_indices(base["point_map"].shape[0])
+        point_map = base["point_map"][view_indices].contiguous().clone()
+        images = base["images"][view_indices].contiguous().clone()
+        images = self.image_processor(
+            images, do_center_crop=False, do_resize=True,
+            size={"height": 224, "width": 224}, return_tensors="pt",
+        )["pixel_values"].squeeze(0).contiguous().clone()
+
+        # --- text: chat-template tokenization (answer-only labels for training).
+        answer = base.get("answer", "") if self.is_train else None
+        enc = build_input_and_labels(
+            self.tokenizer,
+            situation=base["situation"],
+            question=base["question"],
+            answer=answer,
+            system_prompt=self.system_prompt,
+            max_len=self.max_txt_len,
+        )
+
+        out = {
+            "images": images,
+            "point_map": point_map,
+            "input_ids": enc["input_ids"],
+            "anchor_loc": base["anchor_loc"],
+            "anchor_yaw": base["anchor_yaw"],
+            # eval / logging metadata
+            "scan_id": base["scan_id"],
+            "question_id": base.get("question_id", idx),
+            "sqa_type": int(base["sqa_type"]),
+            "ref_answers": base.get("ref_answers", []),
+            "situation": base["situation"],
+            "question": base["question"],
+        }
+        if enc["labels"] is not None:
+            out["labels"] = enc["labels"]
+        return out
+
+    def collate_fn(self, batch_list):
+        collated = {}
+
+        # Stack fixed-shape tensors.
+        for key in ["images", "point_map", "anchor_loc", "anchor_yaw"]:
+            collated[key] = torch.stack([s[key].contiguous().clone() for s in batch_list], dim=0)
+
+        # Right-pad variable-length token sequences; the model re-pads via attention_mask.
+        ids = [s["input_ids"] for s in batch_list]
+        max_len = max(t.shape[0] for t in ids)
+        B = len(ids)
+        input_ids = torch.full((B, max_len), self.pad_token_id, dtype=torch.long)
+        attention_mask = torch.zeros((B, max_len), dtype=torch.long)
+        for i, t in enumerate(ids):
+            input_ids[i, : t.shape[0]] = t
+            attention_mask[i, : t.shape[0]] = 1
+        collated["input_ids"] = input_ids
+        collated["attention_mask"] = attention_mask
+
+        if "labels" in batch_list[0]:
+            labels = torch.full((B, max_len), IGNORE_INDEX, dtype=torch.long)
+            for i, s in enumerate(batch_list):
+                t = s["labels"]
+                labels[i, : t.shape[0]] = t
+            collated["labels"] = labels
+
+        # Keep python-side metadata as lists.
+        collated["sqa_type"] = torch.tensor([s["sqa_type"] for s in batch_list], dtype=torch.long)
+        for key in ["scan_id", "question_id", "ref_answers", "situation", "question"]:
+            collated[key] = [s[key] for s in batch_list]
         return collated

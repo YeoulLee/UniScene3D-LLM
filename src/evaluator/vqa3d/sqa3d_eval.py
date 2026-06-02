@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from data.data_utils import SQA3DAnswer
+from data.data_utils import SQA3DAnswer, clean_answer
 from evaluator.common.build import EVALUATOR_REGISTRY
 import re
 
@@ -188,3 +188,74 @@ class SQA3DEval():
             torch.save(self.eval_results, str(self.save_dir / 'results.pt'))
 
         return is_best, self.eval_dict
+
+
+@EVALUATOR_REGISTRY.register()
+class SQA3DLLMEval():
+    """Generative exact-match evaluator for SQA3D.
+
+    Scores model-generated answer strings against the ground-truth answer set using the
+    repo's clean_answer normalization, and reports overall EM plus per-question-type EM
+    (0: what, 1: is, 2: how, 3: can, 4: which, 5: others).
+    """
+
+    TYPE_NAMES = {0: "what", 1: "is", 2: "how", 3: "can", 4: "which", 5: "others"}
+
+    def __init__(self, cfg, accelerator):
+        self.accelerator = accelerator
+        self.best_result = -np.inf
+        self.save = cfg.eval.get("save", False)
+        if self.save:
+            self.save_dir = Path(cfg.exp_dir) / "eval_results" / "sqa3d_llm"
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _match(pred, refs):
+        """Return 1 if the normalized prediction matches any normalized reference answer."""
+        p = clean_answer(pred)
+        ref_set = {clean_answer(r) for r in refs}
+        return 1.0 if p in ref_set else 0.0
+
+    def evaluate(self, records, split="val"):
+        """Compute EM metrics over gathered per-sample prediction records."""
+        # Deduplicate in case gather replicated records across processes.
+        seen, unique = set(), []
+        for r in records:
+            key = (r.get("scan_id"), r.get("question_id"), r.get("question"))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(r)
+        records = unique
+
+        total = max(len(records), 1)
+        correct = 0.0
+        type_correct = {t: 0.0 for t in self.TYPE_NAMES}
+        type_count = {t: 0 for t in self.TYPE_NAMES}
+
+        for r in records:
+            hit = self._match(r["pred"], r["ref_answers"])
+            correct += hit
+            t = int(r["sqa_type"])
+            type_correct[t] += hit
+            type_count[t] += 1
+
+        results = {"em_acc": correct / total, "num_samples": float(len(records))}
+        for t, name in self.TYPE_NAMES.items():
+            results[f"type_{t}_{name}_acc"] = type_correct[t] / max(type_count[t], 1)
+        results["target_metric"] = results["em_acc"]
+
+        is_best = results["target_metric"] > self.best_result
+        if is_best:
+            self.best_result = results["target_metric"]
+        results["best_result"] = self.best_result
+
+        if self.save and self.accelerator.is_main_process and (is_best or split == "test"):
+            with (self.save_dir / f"results_{split}.json").open("w", encoding="utf-8") as f:
+                json.dump(records, f, ensure_ascii=False, indent=2)
+
+        return is_best, results
+
+    def reset(self):
+        return
+

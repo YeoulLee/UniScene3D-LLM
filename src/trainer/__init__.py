@@ -2,3 +2,4 @@
 
 from .default_trainer import *
 from .uniscene3d_trainer import *
+from .llm_trainer import *

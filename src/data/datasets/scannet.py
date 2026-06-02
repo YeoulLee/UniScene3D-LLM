@@ -17,6 +17,7 @@ from ..data_utils import (
     Hypo3DAnswer,
     msnnAnswer,
     get_sqa_question_type,
+    quat_to_yaw,
     load_safetensor_from_hf,
 )
 from .base import ScanBase
@@ -388,20 +389,39 @@ class ScanNetSQA3D(ScanNetBase):
         point_map = scene_tensor['point_map'].permute(0, 3, 1, 2)
         images = scene_tensor['color_images'].permute(0, 3, 1, 2)
         question_type = get_sqa_question_type(question)
-            
+
         # convert answer format
         answer_label = torch.zeros(self.num_answers).long()
         for _id in answer_id_list:
             answer_label[_id] = 1
-        
+
+        # Agent situated pose (used only by the ego coordinate frame). Defaults to identity
+        # when the annotation lacks position/rotation; the world-frame baseline ignores it.
+        pose = self.questions_map[scan_id][item_id]
+        position = pose.get('position') or {}
+        anchor_loc = torch.tensor([
+            float(position.get('x', 0.0)),
+            float(position.get('y', 0.0)),
+            float(position.get('z', 0.0)),
+        ], dtype=torch.float32) if isinstance(position, dict) else torch.zeros(3, dtype=torch.float32)
+        anchor_yaw = torch.tensor(quat_to_yaw(pose.get('rotation')), dtype=torch.float32)
+
         return {
             "sentence": concat_sentence,
+            "situation": situation,
+            "question": question,
+            # Generative target: the canonical (first) answer; ref_answers keeps all gts for EM.
+            "answer": answer_list[0] if len(answer_list) > 0 else "",
+            "ref_answers": answer_list,
             "scan_dir": os.path.join(self.base_dir, 'scans'),
             "scan_id": scan_id,
-            "answer_label": answer_label, # A  
+            "question_id": item_id,
+            "answer_label": answer_label, # A
             "point_map" : point_map,
             "images": images,
-            "sqa_type": question_type
+            "sqa_type": question_type,
+            "anchor_loc": anchor_loc,
+            "anchor_yaw": anchor_yaw,
         }
 
     def build_answer(self):
@@ -447,7 +467,9 @@ class ScanNetSQA3D(ScanNetBase):
                 questions_map[item['scene_id']] = {}
             questions_map[item['scene_id']][item['question_id']] = {
                 'situation': [item['situation']] + item['alternative_situation'],   # list of sentences
-                'question': item['question']   # sentence
+                'question': item['question'],   # sentence
+                'position': item.get('position'),   # agent xyz (for ego frame); may be absent
+                'rotation': item.get('rotation'),   # agent quaternion (for ego frame); may be absent
             }
 
         return questions_map

@@ -11,6 +11,11 @@ def answer_loss(data_dict):
             data_dict["answer_scores"], data_dict["answer_label"].float(), reduction='sum'
         ) / data_dict["answer_scores"].shape[0]
 
+
+def lm_loss(data_dict):
+    """Pass-through for the LLM next-token loss computed inside the model forward."""
+    return data_dict["lm_loss"]
+
 class Loss(nn.Module):
     def __init__(self, cfg, accelerator):
         super().__init__()
