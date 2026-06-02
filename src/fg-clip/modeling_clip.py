@@ -1171,7 +1171,8 @@ class CLIPVisionEmbeddings(nn.Module):
             if interpolate_pos_encoding:
                 embeddings = embeddings + self.interpolate_pos_encoding(embeddings, height, width)
             else:
-                embeddings = embeddings + self.position_embedding(self.position_ids)
+                pos_ids = torch.arange(self.num_positions, device=embeddings.device)
+                embeddings = embeddings + self.position_embedding(pos_ids)
             return embeddings
         else:
             batch_size = pixel_values.shape[0]
@@ -1200,7 +1201,8 @@ class CLIPVisionEmbeddings(nn.Module):
             if interpolate_pos_encoding:
                 embeddings = embeddings + self.interpolate_pos_encoding(embeddings, height, width)
             else:
-                embeddings = embeddings + self.position_embedding(self.position_ids)
+                pos_ids = torch.arange(self.num_positions, device=embeddings.device)
+                embeddings = embeddings + self.position_embedding(pos_ids)
         
             return embeddings
 
