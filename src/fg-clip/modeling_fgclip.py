@@ -41,6 +41,13 @@ class FGCLIPModel(CLIPModel):
     def __init__(self, config):
         super(CLIPModel, self).__init__(config)
 
+        # transformers >= 5 may keep nested sub-configs as plain dicts (the 4.x auto-conversion
+        # in CLIPConfig.__init__ no longer always runs through the loading path). Coerce them.
+        if isinstance(config.text_config, dict):
+            config.text_config = CLIPTextConfig(**config.text_config)
+        if isinstance(config.vision_config, dict):
+            config.vision_config = CLIPVisionConfig(**config.vision_config)
+
         if not isinstance(config.text_config, CLIPTextConfig):
             raise ValueError(
                 "config.text_config is expected to be of type CLIPTextConfig but is of type"
