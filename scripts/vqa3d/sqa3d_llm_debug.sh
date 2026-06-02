@@ -19,7 +19,7 @@ python run.py \
   debug.flag=True debug.hard_debug=True debug.debug_size=8 \
   dataloader.batchsize=1 dataloader.num_workers=0 \
   solver.gradient_accumulation_steps=1 \
-  solver.epochs=50 solver.epochs_per_eval=10 solver.warmup_steps=10 \
+  solver.epochs=50 solver.epochs_per_eval=10 solver.sched.args.warmup_steps=10 \
   hydra.run.dir=. \
   hydra.output_subdir=null \
   hydra/job_logging=disabled \

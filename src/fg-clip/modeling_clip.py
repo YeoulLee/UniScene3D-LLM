@@ -24,7 +24,10 @@ if TYPE_CHECKING:
     from transformers.utils import TensorType
 
 from transformers.configuration_utils import PretrainedConfig
-from transformers.onnx import OnnxConfig
+try:
+    from transformers.onnx import OnnxConfig
+except ImportError:  # transformers >= 5 removed transformers.onnx; CLIPOnnxConfig is unused here.
+    OnnxConfig = object
 from transformers.utils import logging
 import torch.nn as nn
 import torch
@@ -510,7 +513,10 @@ if TYPE_CHECKING:
     from transformers.utils import TensorType
 
 from transformers.configuration_utils import PretrainedConfig
-from transformers.onnx import OnnxConfig
+try:
+    from transformers.onnx import OnnxConfig
+except ImportError:  # transformers >= 5 removed transformers.onnx; CLIPOnnxConfig is unused here.
+    OnnxConfig = object
 from transformers.utils import logging
 
 
