@@ -210,16 +210,49 @@ class BaseTrainer():
             # Merge shard files into one state dict before loading.
             weights.update(load_file(model_weight_path, device="cpu"))
 
-        self.model.load_state_dict(weights, strict=False)
+        self._load_weights_into_model(weights)
 
         vision_model_keys = {
-            key for key in self.model.state_dict().keys()
+            key for key, _ in self.model.named_parameters()
             if key.startswith("pm_encoder.vision_model.")
         }
         loaded_vision_model_keys = vision_model_keys.intersection(weights.keys())
 
         if vision_model_keys and loaded_vision_model_keys == vision_model_keys:
             print(f"✅ Entire UniScene3D vision encoder is loaded.")
+
+    def _load_weights_into_model(self, weights):
+        """Load a (full-shape) state dict, robust to DeepSpeed ZeRO-3 parameter partitioning.
+
+        Under ZeRO-3 (zero.Init), params are sharded at construction so their local shape is
+        e.g. torch.Size([0]); a plain load_state_dict then errors on shape mismatch. In that
+        case we gather each param with deepspeed.zero.GatheredParameters, copy the checkpoint
+        value on rank 0, and let the context re-partition/broadcast on exit. Buffers are not
+        partitioned and are copied directly. Without ZeRO-3 this falls back to load_state_dict.
+        """
+        params = list(self.model.named_parameters())
+        is_zero3 = any(hasattr(p, "ds_id") for _, p in params)
+
+        if not is_zero3:
+            self.model.load_state_dict(weights, strict=False)
+            return
+
+        import deepspeed  # local import: only needed on the ZeRO-3 path
+
+        missing = []
+        for name, p in params:
+            if name not in weights:
+                missing.append(name)
+                continue
+            with deepspeed.zero.GatheredParameters([p], modifier_rank=0):
+                if self.accelerator.is_main_process:
+                    p.data.copy_(weights[name].to(device=p.device, dtype=p.dtype))
+        # Buffers (e.g. logit-scale-adjacent or non-persistent) are replicated, not sharded.
+        for name, b in self.model.named_buffers():
+            if name in weights:
+                b.data.copy_(weights[name].to(device=b.device, dtype=b.dtype))
+        print(f"📦 ZeRO-3 partition-safe load: copied {len(params) - len(missing)} params "
+              f"({len(missing)} not in checkpoint, left as-is).")
 
     def save_func(self, path):
         self.accelerator.save_state(path)
