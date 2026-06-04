@@ -72,7 +72,7 @@ class LLMTrainer(DefaultTrainer):
     @torch.no_grad()
     def test_step(self):
         self.model.eval()
-        records = self._collect_predictions(self.data_loaders["val"], desc="[test]")
+        records = self._collect_predictions(self.data_loaders["test"], desc="[test]")
         self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process:
             _, results = self.evaluator.evaluate(records, split="test")
