@@ -12,6 +12,7 @@ Training returns the next-token LM loss over answer tokens (data_dict['lm_loss']
 Evaluation generates the answer string (data_dict['output_text']).
 """
 
+import contextlib
 from pathlib import Path
 
 import torch
@@ -53,6 +54,11 @@ class UniScene3DLLM(BaseModel):
         assert self.vision_feature in ("projected", "penultimate")
         self.feature_dim = 512 if self.vision_feature == "projected" else 768
         self.coord_frame = mcfg.get("coord_frame", "world")            # world | ego
+        # Encoder fine-tuning scope: frozen (default) | partial (last N vision layers) | full.
+        self.encoder_tune = mcfg.get("encoder_tune", "frozen")
+        assert self.encoder_tune in ("frozen", "partial", "full")
+        self.encoder_unfreeze_last_n = int(mcfg.get("encoder_unfreeze_last_n", 4))
+
         # Ablation switches:
         self.use_vision = bool(mcfg.get("use_vision", True))           # False => text-only baseline
         pe_cfg = mcfg.get("pos_embed", {})
@@ -111,7 +117,10 @@ class UniScene3DLLM(BaseModel):
         images = images.reshape(B * V, C, H, W).contiguous().float()
         pm = point_map.reshape(B * V, C, H, W).contiguous().float()
         color_pm = torch.cat([images, pm], dim=1)  # 6-channel colored point map
-        with torch.no_grad():
+        # Only block gradients when the encoder is fully frozen; otherwise let them flow so
+        # the tuned (partial/full) encoder layers can train.
+        grad_ctx = torch.no_grad() if self.encoder_tune == "frozen" else contextlib.nullcontext()
+        with grad_ctx:
             with autocast("cuda", dtype=torch.bfloat16):
                 feat = self._dense_features(color_pm)  # (B*V, P, D)
         P, D = feat.shape[1], feat.shape[2]
@@ -168,11 +177,40 @@ class UniScene3DLLM(BaseModel):
         return data_dict
 
     # ------------------------------------------------------------------ modes / params
-    def set_downstream_mode(self):
-        """Freeze the FG-CLIP encoder; train the LLM (and projector unless text-only)."""
+    def _set_encoder_trainability(self):
+        """Set requires_grad on the FG-CLIP encoder per `encoder_tune`.
+
+        frozen  : everything frozen (eval mode).
+        full    : all vision params trainable (text_model stays frozen — unused here).
+        partial : only the last `encoder_unfreeze_last_n` vision transformer layers, plus
+                  post_layernorm and visual_projection, are trainable.
+        """
         for p in self.pm_encoder.parameters():
             p.requires_grad = False
-        self.pm_encoder.eval()
+
+        if self.encoder_tune == "frozen" or not self.use_vision:
+            self.pm_encoder.eval()
+            return
+
+        num_layers = len(self.pm_encoder.vision_model.encoder.layers)
+        unfreeze_from = max(0, num_layers - self.encoder_unfreeze_last_n)
+        for name, p in self.pm_encoder.named_parameters():
+            if "text_model" in name:          # text tower is never used; keep frozen
+                continue
+            if self.encoder_tune == "full":
+                p.requires_grad = True
+            elif self.encoder_tune == "partial":
+                if "post_layernorm" in name or name.startswith("visual_projection"):
+                    p.requires_grad = True
+                elif "vision_model.encoder.layers." in name:
+                    layer_idx = int(name.split("vision_model.encoder.layers.")[1].split(".")[0])
+                    if layer_idx >= unfreeze_from:
+                        p.requires_grad = True
+        self.pm_encoder.train()
+
+    def set_downstream_mode(self):
+        """Set trainability: LLM (+projector unless text-only) always; encoder per encoder_tune."""
+        self._set_encoder_trainability()
         # In the text-only ablation the projector is unused; freeze it so DeepSpeed does not
         # flag an unused trainable parameter.
         for p in self.projector.parameters():
@@ -185,7 +223,15 @@ class UniScene3DLLM(BaseModel):
         return
 
     def get_opt_params(self):
-        """Full fine-tune: all trainable params (projector + LLM) at solver.lr."""
+        """Optimizer groups: projector+LLM at solver.lr; tuned encoder at encoder_lr (if set)."""
         lr = self.cfg.solver.lr
-        params = [(n, p) for n, p in self.named_parameters() if p.requires_grad]
-        return no_decay_param_group(params, lr)
+        encoder_lr = self.cfg.model.get("encoder_lr", None)
+
+        trainable = [(n, p) for n, p in self.named_parameters() if p.requires_grad]
+        if encoder_lr is None or self.encoder_tune == "frozen":
+            return no_decay_param_group(trainable, lr)
+
+        # Separate the (tuned) encoder params so they can use a smaller learning rate.
+        enc = [(n, p) for n, p in trainable if n.startswith("pm_encoder.")]
+        rest = [(n, p) for n, p in trainable if not n.startswith("pm_encoder.")]
+        return no_decay_param_group(rest, lr) + no_decay_param_group(enc, float(encoder_lr))

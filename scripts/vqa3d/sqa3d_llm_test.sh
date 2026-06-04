@@ -25,6 +25,8 @@ VISION_FEATURE="projected"      # projected | penultimate
 COORD_FRAME="world"             # world | ego
 POS_EMBED_ENABLED="True"        # True | False
 POS_EMBED_NORMALIZE="none"      # none | scene_bbox | fixed_scale
+ENCODER_TUNE="frozen"           # frozen | partial | full
+ENCODER_UNFREEZE_LAST_N="4"     # used when ENCODER_TUNE=partial
 
 if [ ! -e "${CKPT_PATH}" ]; then
   echo "[ERROR] CKPT_PATH does not exist: ${CKPT_PATH}"
@@ -33,7 +35,7 @@ if [ ! -e "${CKPT_PATH}" ]; then
 fi
 
 echo "[INFO] Testing checkpoint: ${CKPT_PATH}"
-echo "[INFO] switches: vision=${USE_VISION} feature=${VISION_FEATURE} frame=${COORD_FRAME} pe=${POS_EMBED_ENABLED} norm=${POS_EMBED_NORMALIZE}"
+echo "[INFO] switches: vision=${USE_VISION} feature=${VISION_FEATURE} frame=${COORD_FRAME} pe=${POS_EMBED_ENABLED} norm=${POS_EMBED_NORMALIZE} encoder=${ENCODER_TUNE}"
 
 accelerate launch --config_file configs/accelerate/zero3_h100x4.yaml \
   run.py \
@@ -50,6 +52,8 @@ accelerate launch --config_file configs/accelerate/zero3_h100x4.yaml \
   model.coord_frame="$COORD_FRAME" \
   model.pos_embed.enabled="$POS_EMBED_ENABLED" \
   model.pos_embed.normalize="$POS_EMBED_NORMALIZE" \
+  model.encoder_tune="$ENCODER_TUNE" \
+  model.encoder_unfreeze_last_n="$ENCODER_UNFREEZE_LAST_N" \
   hydra.run.dir=. \
   hydra.output_subdir=null \
   hydra/job_logging=disabled \

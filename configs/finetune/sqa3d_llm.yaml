@@ -78,6 +78,9 @@ eval:
 model:
   name: UniScene3DLLM
   use_vision: True              # False = text-only baseline (no visual tokens; <scene> stays 1 token)
+  encoder_tune: "frozen"        # frozen | partial(last N vision layers) | full
+  encoder_unfreeze_last_n: 4    # number of top vision layers to train when encoder_tune=partial
+  encoder_lr: null              # separate LR for tuned encoder params (null = same as solver.lr)
   vision_feature: "projected"   # projected(512, default) | penultimate(768)
   coord_frame: "world"          # world | ego
   pos_embed:
