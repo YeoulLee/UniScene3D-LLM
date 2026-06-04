@@ -8,7 +8,7 @@ import numpy as np
 
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.logging import get_logger
-from accelerate.utils import set_seed, InitProcessGroupKwargs
+from accelerate.utils import set_seed, InitProcessGroupKwargs, DistributedType
 from fvcore.common.registry import Registry
 import torch
 import wandb
@@ -129,9 +129,18 @@ class BaseTrainer():
                 self.model.pm_encoder.load_state_dict(self.model.pm_encoder.state_dict())
 
         # Let Accelerate wrap the model, optimizer, and dataloaders for the chosen backend.
-        self.model, self.loss, self.optimizer, self.scheduler = self.accelerator.prepare(
-            self.model, self.loss, self.optimizer, self.scheduler
-        )
+        # DeepSpeed forbids preparing two nn.Modules with one Accelerator; self.loss is an
+        # nn.Module (parameter-free for lm_loss), so under DeepSpeed we prepare only the model
+        # and just move the loss to the right device.
+        if self.accelerator.distributed_type == DistributedType.DEEPSPEED:
+            self.model, self.optimizer, self.scheduler = self.accelerator.prepare(
+                self.model, self.optimizer, self.scheduler
+            )
+            self.loss = self.loss.to(self.accelerator.device)
+        else:
+            self.model, self.loss, self.optimizer, self.scheduler = self.accelerator.prepare(
+                self.model, self.loss, self.optimizer, self.scheduler
+            )
         for name, loader in self.data_loaders.items():
             if isinstance(loader, list):
                 loader = self.accelerator.prepare(*loader)
