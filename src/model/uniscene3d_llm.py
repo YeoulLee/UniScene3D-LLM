@@ -68,6 +68,9 @@ class UniScene3DLLM(BaseModel):
             attn_implementation=llm_cfg.get("attn_implementation", None),
             gradient_checkpointing=bool(llm_cfg.get("gradient_checkpointing", False)),
         )
+        # Expose the LLM config as `.config` so Accelerate/DeepSpeed can auto-fill ZeRO-3
+        # bucket sizes from hidden_size (this wrapper otherwise has no .config).
+        self.config = self.llm.model.config
 
         # --- projector (feature_dim -> llm hidden)
         proj_cfg = mcfg.get("projector", {})
