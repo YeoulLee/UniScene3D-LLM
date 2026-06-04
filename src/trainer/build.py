@@ -181,6 +181,17 @@ class BaseTrainer():
             self.optimizer.zero_grad()
             self.scheduler.step()
 
+    def _broadcast_flag(self, value):
+        """Make a main-process boolean consistent across all ranks (gather-max).
+
+        Only the main process computes metrics, so a flag like is_best is real there and 0
+        elsewhere; the max over ranks equals the main process's value on every rank. Identical
+        control flow across ranks is required to avoid collective deadlocks at checkpoint save
+        (DeepSpeed ZeRO-3 save_state gathers sharded params and needs every rank to call it).
+        """
+        t = torch.tensor([1.0 if value else 0.0], device=self.accelerator.device)
+        return bool(self.accelerator.gather(t).max().item() > 0.5)
+
     def log(self, results, mode="train"):
         if not self.hard_debug:
             log_dict = {}

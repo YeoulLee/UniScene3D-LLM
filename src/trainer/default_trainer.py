@@ -82,15 +82,15 @@ class DefaultTrainer(BaseTrainer):
 
         self.accelerator.wait_for_everyone()
 
+        is_best = False
         if self.accelerator.is_main_process:
             is_best, results = self.evaluator.record()
             if is_best:
                 self.best_metric = results["target_metric"]
             self.log(results, mode="val")
             self.evaluator.reset()
-            return is_best
-
-        return False
+        # Broadcast so all ranks agree on the save path (saves are collective under DeepSpeed).
+        return self._broadcast_flag(is_best)
 
     @torch.no_grad()
     def test_step(self):
@@ -144,12 +144,13 @@ class DefaultTrainer(BaseTrainer):
                     is_best = False
 
                 self.accelerator.wait_for_everyone()
-                if self.accelerator.is_main_process:
-                    self.save("latest.pth")
-                    if is_best:
-                        self.save("best.pth")
-                    if self.epochs_per_save and (epoch + 1) % self.epochs_per_save == 0:
-                        self.save(f"ckpt_{epoch+1}.pth")
+                # Collective save: every rank must call save_state under DeepSpeed ZeRO-3.
+                self.save("latest.pth")
+                if is_best:
+                    self.save("best.pth")
+                if self.epochs_per_save and (epoch + 1) % self.epochs_per_save == 0:
+                    self.save(f"ckpt_{epoch+1}.pth")
+                self.accelerator.wait_for_everyone()
 
         self.test_step()
         if self.mode == "train":

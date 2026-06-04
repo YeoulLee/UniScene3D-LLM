@@ -60,13 +60,14 @@ class LLMTrainer(DefaultTrainer):
         self.model.eval()
         records = self._collect_predictions(self.data_loaders["val"], desc=f"[eval {epoch + 1}]")
         self.accelerator.wait_for_everyone()
+        is_best = False
         if self.accelerator.is_main_process:
             is_best, results = self.evaluator.evaluate(records, split="val")
             if is_best:
                 self.best_metric = results["target_metric"]
             self.log(results, mode="val")
-            return is_best
-        return False
+        # Broadcast so every rank agrees whether to save best.pth (all ranks must call save).
+        return self._broadcast_flag(is_best)
 
     @torch.no_grad()
     def test_step(self):
@@ -78,3 +79,40 @@ class LLMTrainer(DefaultTrainer):
             self.log(results, mode="test")
             return results
         return None
+
+    def run(self):
+        """Training loop with DeepSpeed-safe checkpointing.
+
+        Unlike DefaultTrainer.run, save_state() is called by ALL ranks (it is a collective
+        under ZeRO-3: sharded params are gathered across ranks), and is_best is already
+        broadcast by eval_step, so every rank takes the same save path. Guarding the save with
+        is_main_process (as DefaultTrainer does) deadlocks under DeepSpeed.
+        """
+        if self.mode == "train":
+            model = self.model.module if hasattr(self.model, "module") else self.model
+            model.set_downstream_mode()
+            start_epoch = self.exp_tracker.epoch
+            self.global_step = start_epoch * len(self.data_loaders["train"])
+
+            for epoch in range(start_epoch, self.epochs):
+                self.exp_tracker.step()
+                self.train_step(epoch)
+
+                if self.epochs_per_eval and (epoch + 1) % self.epochs_per_eval == 0:
+                    is_best = self.eval_step(epoch)
+                    self.accelerator.print(f"[Epoch {epoch + 1}/{self.epochs}] eval done, is_best={is_best}")
+                else:
+                    is_best = False
+
+                self.accelerator.wait_for_everyone()
+                # Collective save: every rank participates (do NOT guard with is_main_process).
+                self.save("latest.pth")
+                if is_best:
+                    self.save("best.pth")
+                if self.epochs_per_save and (epoch + 1) % self.epochs_per_save == 0:
+                    self.save(f"ckpt_{epoch + 1}.pth")
+                self.accelerator.wait_for_everyone()
+
+        self.test_step()
+        if self.mode == "train":
+            self.accelerator.end_training()
