@@ -53,7 +53,10 @@ class UniScene3DLLM(BaseModel):
         assert self.vision_feature in ("projected", "penultimate")
         self.feature_dim = 512 if self.vision_feature == "projected" else 768
         self.coord_frame = mcfg.get("coord_frame", "world")            # world | ego
-        self.pos_embed_max_freq = float(mcfg.get("pos_embed", {}).get("max_freq", 64.0))
+        pe_cfg = mcfg.get("pos_embed", {})
+        self.pos_normalize = pe_cfg.get("normalize", "none")           # none(paper) | scene_bbox | fixed_scale
+        self.pos_temperature = float(pe_cfg.get("temperature", 10000.0))
+        self.pos_fixed_scale = float(pe_cfg.get("fixed_scale", 10.0))
 
         # --- token reducer (Identity now; registry plug-in later)
         self.reducer = build_token_reducer(mcfg.get("reducer", {"name": "Identity"}))
@@ -123,11 +126,13 @@ class UniScene3DLLM(BaseModel):
         coords, valid = pool_pointmap_to_patches(point_map, P)  # (B,V,P,3), (B,V,P)
         coords = apply_coord_frame(
             coords, valid, self.coord_frame,
+            normalize=self.pos_normalize,
             anchor_loc=data_dict.get("anchor_loc"),
             anchor_yaw=data_dict.get("anchor_yaw"),
+            fixed_scale=self.pos_fixed_scale,
         )
 
-        pe = sinusoidal_pos_embed_3d(coords, feats.shape[-1], max_freq=self.pos_embed_max_freq)
+        pe = sinusoidal_pos_embed_3d(coords, feats.shape[-1], temperature=self.pos_temperature)
         feats = feats + pe.to(feats.dtype)
 
         tokens = feats.reshape(B, V * P, feats.shape[-1])

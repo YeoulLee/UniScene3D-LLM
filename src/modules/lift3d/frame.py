@@ -85,18 +85,25 @@ def normalize_coords(coords: torch.Tensor, valid: torch.Tensor, eps: float = 1e-
     return normed.reshape(B, V, P, 3)
 
 
-def apply_coord_frame(coords, valid, frame, anchor_loc=None, anchor_yaw=None):
-    """Apply the configured coordinate frame, then per-scene normalization.
+def apply_coord_frame(coords, valid, frame, normalize="none",
+                      anchor_loc=None, anchor_yaw=None, fixed_scale=10.0):
+    """Apply the configured coordinate frame, then optional coordinate scaling.
+
+    Video-3D-LLM (arXiv:2412.00493) feeds *raw* metric coordinates to the sinusoidal 3D PE,
+    so the default is ``normalize="none"``. Per-scene min-max ("scene_bbox") and fixed metric
+    scaling ("fixed_scale") are kept as ablations.
 
     Args:
         coords: (B, V, P, 3) world coordinates from coord_pool.
         valid:  (B, V, P) bool patch-validity mask.
         frame: "world" or "ego".
+        normalize: "none" (paper) | "scene_bbox" | "fixed_scale".
         anchor_loc: (B, 3) required when frame == "ego".
         anchor_yaw: (B,) required when frame == "ego".
+        fixed_scale: divisor (meters) used when normalize == "fixed_scale".
 
     Returns:
-        (B, V, P, 3) normalized coordinates ready for the 3D PE.
+        (B, V, P, 3) coordinates ready for the 3D PE.
     """
     if frame == "ego":
         if anchor_loc is None or anchor_yaw is None:
@@ -104,4 +111,11 @@ def apply_coord_frame(coords, valid, frame, anchor_loc=None, anchor_yaw=None):
         coords = transform_to_ego(coords, anchor_loc, anchor_yaw)
     elif frame != "world":
         raise ValueError(f"Unknown coord_frame '{frame}' (expected 'world' or 'ego').")
-    return normalize_coords(coords, valid)
+
+    if normalize == "none":
+        return coords
+    if normalize == "scene_bbox":
+        return normalize_coords(coords, valid)
+    if normalize == "fixed_scale":
+        return (coords / float(fixed_scale)) * valid.unsqueeze(-1).to(coords.dtype)
+    raise ValueError(f"Unknown normalize '{normalize}' (expected none|scene_bbox|fixed_scale).")

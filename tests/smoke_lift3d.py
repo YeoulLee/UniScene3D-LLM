@@ -77,7 +77,40 @@ def test_frame_switch():
                           anchor_loc=torch.randn(B, 3), anchor_yaw=torch.randn(B))
     assert w.shape == e.shape == (B, V, P, 3)
     assert not torch.allclose(w, e), "world and ego frames should differ"
-    print("[ok] world/ego frame switch produces distinct normalized coords")
+    print("[ok] world/ego frame switch produces distinct coords")
+
+
+def test_normalize_options():
+    B, V, P = 2, 2, 16
+    coords = torch.randn(B, V, P, 3) * 5.0
+    valid = torch.ones(B, V, P, dtype=torch.bool)
+    # Paper default: raw coords pass through unchanged.
+    raw = apply_coord_frame(coords, valid, "world", normalize="none")
+    assert torch.allclose(raw, coords)
+    # fixed_scale divides by the given meters.
+    fs = apply_coord_frame(coords, valid, "world", normalize="fixed_scale", fixed_scale=5.0)
+    assert torch.allclose(fs, coords / 5.0)
+    # scene_bbox stays within [-1, 1].
+    sb = apply_coord_frame(coords, valid, "world", normalize="scene_bbox")
+    assert sb.abs().max() <= 1.0 + 1e-4
+    print("[ok] normalize options: none(raw) / fixed_scale / scene_bbox")
+
+
+def test_paper_sincos_formula():
+    # Video-3D-LLM PE: even channels = sin, odd channels = cos (per axis).
+    coords = torch.tensor([[[[1.3, -2.0, 0.5]]]])  # (1,1,1,3)
+    dim = 24  # per_axis = 8 -> 4 freqs each
+    pe = sinusoidal_pos_embed_3d(coords, dim, temperature=10000.0)
+    assert pe.shape == (1, 1, 1, dim)
+    per_axis = (dim // 3) - ((dim // 3) % 2)
+    half = per_axis // 2
+    i = torch.arange(half, dtype=torch.float32)
+    div = 10000.0 ** (-(2.0 * i) / per_axis)
+    x = coords[0, 0, 0, 0]
+    ang = x * div
+    assert torch.allclose(pe[0, 0, 0, 0:per_axis:2], torch.sin(ang), atol=1e-5)
+    assert torch.allclose(pe[0, 0, 0, 1:per_axis:2], torch.cos(ang), atol=1e-5)
+    print("[ok] 3D PE matches Video-3D-LLM sin/cos formula on raw coords")
 
 
 def test_pos_embed_and_projector():
@@ -106,5 +139,7 @@ if __name__ == "__main__":
     test_ego_puts_anchor_at_origin()
     test_normalize_range()
     test_frame_switch()
+    test_normalize_options()
+    test_paper_sincos_formula()
     test_pos_embed_and_projector()
     print("\nAll lift3d smoke tests passed.")

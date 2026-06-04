@@ -80,7 +80,9 @@ model:
   vision_feature: "projected"   # projected(512, default) | penultimate(768)
   coord_frame: "world"          # world | ego
   pos_embed:
-    max_freq: 64.0
+    normalize: "none"           # none(Video-3D-LLM default) | scene_bbox | fixed_scale
+    temperature: 10000.0        # sinusoidal base (paper: 10000)
+    fixed_scale: 10.0           # meters divisor when normalize=fixed_scale
   reducer:
     name: "Identity"            # Identity | (future) Voxel / PixelShuffle / FPS / QFormer
   projector:
