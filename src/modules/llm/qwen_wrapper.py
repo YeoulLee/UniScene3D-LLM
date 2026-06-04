@@ -58,29 +58,28 @@ class QwenLLM(nn.Module):
         B = input_ids.shape[0]
         device = input_ids.device
         embed_w = self.model.get_input_embeddings().weight
-        visual_embeds = visual_embeds.to(embed_w.dtype)
+        if visual_embeds is not None:
+            visual_embeds = visual_embeds.to(embed_w.dtype)
 
         merged_embeds, merged_labels, lengths = [], [], []
         for b in range(B):
             keep = attention_mask[b].bool()
             ids_b = input_ids[b][keep]
             txt_emb = self._embed(ids_b)  # (Lb, H)
+            lbl_b = labels[b][keep] if labels is not None else None
 
             scene_pos = (ids_b == self.scene_token_id).nonzero(as_tuple=False)
-            if scene_pos.numel() == 0:
-                # No scene token (should not happen) -> text only.
+            if visual_embeds is None or scene_pos.numel() == 0:
+                # Text-only (use_vision=False ablation) or missing scene token:
+                # keep <scene> as a single placeholder token, no splice.
                 emb_b = txt_emb
-                lbl_b = labels[b][keep] if labels is not None else None
             else:
                 p = int(scene_pos[0, 0])
                 emb_b = torch.cat([txt_emb[:p], visual_embeds[b], txt_emb[p + 1:]], dim=0)
                 if labels is not None:
-                    lbl_b = labels[b][keep]
                     n = visual_embeds.shape[1]
                     ignore = torch.full((n,), IGNORE_INDEX, dtype=lbl_b.dtype, device=device)
                     lbl_b = torch.cat([lbl_b[:p], ignore, lbl_b[p + 1:]], dim=0)
-                else:
-                    lbl_b = None
             merged_embeds.append(emb_b)
             merged_labels.append(lbl_b)
             lengths.append(emb_b.shape[0])

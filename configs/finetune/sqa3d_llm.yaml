@@ -77,9 +77,11 @@ eval:
 # Model details
 model:
   name: UniScene3DLLM
+  use_vision: True              # False = text-only baseline (no visual tokens; <scene> stays 1 token)
   vision_feature: "projected"   # projected(512, default) | penultimate(768)
   coord_frame: "world"          # world | ego
   pos_embed:
+    enabled: True               # False = patch tokens without 3D PE (PE ablation)
     normalize: "none"           # none(Video-3D-LLM default) | scene_bbox | fixed_scale
     temperature: 10000.0        # sinusoidal base (paper: 10000)
     fixed_scale: 10.0           # meters divisor when normalize=fixed_scale

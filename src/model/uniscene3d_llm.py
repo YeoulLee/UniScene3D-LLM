@@ -53,7 +53,10 @@ class UniScene3DLLM(BaseModel):
         assert self.vision_feature in ("projected", "penultimate")
         self.feature_dim = 512 if self.vision_feature == "projected" else 768
         self.coord_frame = mcfg.get("coord_frame", "world")            # world | ego
+        # Ablation switches:
+        self.use_vision = bool(mcfg.get("use_vision", True))           # False => text-only baseline
         pe_cfg = mcfg.get("pos_embed", {})
+        self.use_pos_embed = bool(pe_cfg.get("enabled", True))         # False => patch tokens without 3D PE
         self.pos_normalize = pe_cfg.get("normalize", "none")           # none(paper) | scene_bbox | fixed_scale
         self.pos_temperature = float(pe_cfg.get("temperature", 10000.0))
         self.pos_fixed_scale = float(pe_cfg.get("fixed_scale", 10.0))
@@ -116,32 +119,36 @@ class UniScene3DLLM(BaseModel):
 
     # ------------------------------------------------------------------ forward
     def forward(self, data_dict, mode="qa"):
-        images = data_dict["images"]        # (B, V, 3, H, W)
-        point_map = data_dict["point_map"]  # (B, V, 3, H, W)
-        B, V = images.shape[0], images.shape[1]
+        if self.use_vision:
+            images = data_dict["images"]        # (B, V, 3, H, W)
+            point_map = data_dict["point_map"]  # (B, V, 3, H, W)
+            B, V = images.shape[0], images.shape[1]
 
-        feats = self._encode_patches(images, point_map)        # (B, V, P, D)
-        P = feats.shape[2]
+            feats = self._encode_patches(images, point_map)        # (B, V, P, D)
+            P = feats.shape[2]
 
-        coords, valid = pool_pointmap_to_patches(point_map, P)  # (B,V,P,3), (B,V,P)
-        coords = apply_coord_frame(
-            coords, valid, self.coord_frame,
-            normalize=self.pos_normalize,
-            anchor_loc=data_dict.get("anchor_loc"),
-            anchor_yaw=data_dict.get("anchor_yaw"),
-            fixed_scale=self.pos_fixed_scale,
-        )
+            # Coordinates are always computed (cheap) so token reducers can use them;
+            # the 3D PE is only added when enabled (pos_embed.enabled ablation).
+            coords, valid = pool_pointmap_to_patches(point_map, P)  # (B,V,P,3), (B,V,P)
+            coords = apply_coord_frame(
+                coords, valid, self.coord_frame,
+                normalize=self.pos_normalize,
+                anchor_loc=data_dict.get("anchor_loc"),
+                anchor_yaw=data_dict.get("anchor_yaw"),
+                fixed_scale=self.pos_fixed_scale,
+            )
+            if self.use_pos_embed:
+                pe = sinusoidal_pos_embed_3d(coords, feats.shape[-1], temperature=self.pos_temperature)
+                feats = feats + pe.to(feats.dtype)
 
-        pe = sinusoidal_pos_embed_3d(coords, feats.shape[-1], temperature=self.pos_temperature)
-        feats = feats + pe.to(feats.dtype)
+            tokens = feats.reshape(B, V * P, feats.shape[-1])
+            tokens, _, _ = self.reducer(tokens, coords.reshape(B, V * P, 3), valid.reshape(B, V * P))
 
-        tokens = feats.reshape(B, V * P, feats.shape[-1])
-        coords_f = coords.reshape(B, V * P, 3)
-        valid_f = valid.reshape(B, V * P)
-        tokens, coords_f, valid_f = self.reducer(tokens, coords_f, valid_f)
-
-        with autocast("cuda", dtype=torch.bfloat16):
-            visual = self.projector(tokens)  # (B, N, llm_hidden)
+            with autocast("cuda", dtype=torch.bfloat16):
+                visual = self.projector(tokens)  # (B, N, llm_hidden)
+        else:
+            # Text-only ablation: no visual tokens; <scene> stays a single placeholder token.
+            visual = None
 
         if self.training:
             loss = self.llm(
@@ -162,12 +169,14 @@ class UniScene3DLLM(BaseModel):
 
     # ------------------------------------------------------------------ modes / params
     def set_downstream_mode(self):
-        """Freeze the FG-CLIP encoder; train projector + LLM."""
+        """Freeze the FG-CLIP encoder; train the LLM (and projector unless text-only)."""
         for p in self.pm_encoder.parameters():
             p.requires_grad = False
         self.pm_encoder.eval()
+        # In the text-only ablation the projector is unused; freeze it so DeepSpeed does not
+        # flag an unused trainable parameter.
         for p in self.projector.parameters():
-            p.requires_grad = True
+            p.requires_grad = self.use_vision
         for p in self.llm.parameters():
             p.requires_grad = True
 
