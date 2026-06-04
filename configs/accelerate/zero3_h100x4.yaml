@@ -16,4 +16,7 @@ same_network: true
 use_cpu: false
 deepspeed_config:
   deepspeed_config_file: configs/deepspeed/zero3.json
-  zero3_init_flag: true
+  # Keep params un-partitioned at model construction so BaseTrainer.load_pretrain's
+  # load_state_dict matches full checkpoint shapes (and resize_token_embeddings works).
+  # DeepSpeed still shards ZeRO-3 params during accelerator.prepare. 4B fits per-rank.
+  zero3_init_flag: false
