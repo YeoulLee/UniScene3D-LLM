@@ -250,6 +250,13 @@ class SQA3DLLMEval():
             self.best_result = results["target_metric"]
         results["best_result"] = self.best_result
 
+        # Print to stdout (the original SQA3DEval printed too; otherwise EM only reaches wandb,
+        # and not even that under hard_debug).
+        print(f"[SQA3D-LLM {split}] EM={results['em_acc']:.4f} "
+              f"(best={self.best_result:.4f}) over {len(records)} samples")
+        for t, name in self.TYPE_NAMES.items():
+            print(f"    type{t} {name:<6}: {results[f'type_{t}_{name}_acc']:.4f} (n={type_count[t]})")
+
         if self.save and self.accelerator.is_main_process and (is_best or split == "test"):
             with (self.save_dir / f"results_{split}.json").open("w", encoding="utf-8") as f:
                 json.dump(records, f, ensure_ascii=False, indent=2)
