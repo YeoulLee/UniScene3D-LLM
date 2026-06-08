@@ -109,9 +109,14 @@ class LLMTrainer(DefaultTrainer):
                 self.save("latest.pth")
                 if is_best:
                     self.save("best.pth")
+                    # Also save a consolidated, directly-loadable model for evaluation/export.
+                    self.save_consolidated("best_model")
                 if self.epochs_per_save and (epoch + 1) % self.epochs_per_save == 0:
                     self.save(f"ckpt_{epoch + 1}.pth")
                 self.accelerator.wait_for_everyone()
+
+            # Consolidated weights of the final epoch (handy when no eval improved best).
+            self.save_consolidated("final_model")
 
         self.test_step()
         if self.mode == "train":

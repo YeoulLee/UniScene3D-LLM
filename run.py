@@ -11,20 +11,36 @@ if str(SRC_ROOT) not in sys.path:
 import hydra
 from omegaconf import OmegaConf, open_dict
 import wandb
+from accelerate import PartialState
+from accelerate.utils import broadcast_object_list
 
 from common.misc import make_dir, rgetattr
 from trainer.build import build_trainer
 
 
+def _broadcast_from_main(value, state):
+    """Return value computed on the main process, replicated to every rank.
+
+    Avoids each rank independently generating a different timestamp/run_id, which on multi-GPU
+    would create one exp_dir per rank and scatter ZeRO-3 checkpoint shards across folders.
+    """
+    holder = [value if state.is_main_process else None]
+    if state.num_processes > 1:
+        broadcast_object_list(holder, from_process=0)
+    return holder[0]
+
+
 @hydra.main(version_base=None, config_path="./configs", config_name="default")
 def main(cfg):
+    state = PartialState()
     if cfg.resume:
         assert Path(cfg.exp_dir).exists(), f"Resuming failed: {cfg.exp_dir} does not exist."
         print(f"Resuming from {cfg.exp_dir}")
         cfg = OmegaConf.load(Path(cfg.exp_dir) / 'config.yaml')
         cfg.resume = True
     else:
-        run_id = wandb.util.generate_id()
+        # Generate once on rank 0 and replicate, so all ranks share one run_id.
+        run_id = _broadcast_from_main(wandb.util.generate_id(), state)
         with open_dict(cfg):
             cfg.logger.run_id = run_id
 
@@ -53,11 +69,15 @@ def main(cfg):
     print(exp_name)
 
     if not cfg.exp_dir:
-        cfg.exp_dir = Path(cfg.base_dir) / exp_name / f"{datetime.now().strftime('%Y-%m-%d-%H:%M:%S.%f')}"
+        # Timestamp generated on rank 0 only, then broadcast, so all ranks share ONE exp_dir
+        # (otherwise each rank makes its own folder and checkpoint shards get scattered).
+        timestamp = _broadcast_from_main(datetime.now().strftime('%Y-%m-%d-%H:%M:%S.%f'), state)
+        cfg.exp_dir = Path(cfg.base_dir) / exp_name / timestamp
     else:
         cfg.exp_dir = Path(cfg.exp_dir)
     make_dir(cfg.exp_dir)
-    OmegaConf.save(cfg, cfg.exp_dir / "config.yaml")
+    if state.is_main_process:
+        OmegaConf.save(cfg, cfg.exp_dir / "config.yaml")
 
     trainer = build_trainer(cfg)
     trainer.run()

@@ -1,10 +1,10 @@
 #!/bin/bash
-# Evaluate a trained UniScene3D-LLM checkpoint on SQA3D (generative EM), 4x H100 ZeRO-3.
+# Evaluate a trained UniScene3D-LLM checkpoint on SQA3D (generative EM), single GPU.
 #
-# This loads the TRAINED projector + Qwen weights via resume (load_pretrain only restores the
-# frozen FG-CLIP encoder). The model-architecture switches below MUST match the trained run,
-# otherwise the checkpoint state_dict will not align (e.g. projected vs penultimate changes the
-# projector input dim). Run with the same #GPUs / ZeRO config used for training.
+# Training now saves a consolidated, directly-loadable model dir ("best_model") via
+# accelerator.save_model, so test just loads it with +test_state_dict (no zero_to_fp32, no
+# DeepSpeed). The model-architecture switches below MUST match the trained run, otherwise the
+# state_dict will not align (e.g. projected vs penultimate changes the projector input dim).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${PROJECT_ROOT}"
@@ -15,8 +15,9 @@ set -o pipefail
 export TOKENIZERS_PARALLELISM=false
 
 # ==== USER SETTINGS ====
-# Path to the trained checkpoint DIRECTORY saved by save_state (e.g. .../ckpt/best.pth).
-CKPT_PATH="results/SQA3D_LLM_.../ckpt/best.pth"
+# Consolidated model directory saved during training (sibling of best.pth).
+# e.g. results/SQA3D_LLM_.../ckpt/best_model  (or final_model)
+STATE_DICT="results/SQA3D_LLM_.../ckpt/best_model"
 NOTE="sqa3d_llm_eval"
 
 # Must match the trained run's model switches:
@@ -28,23 +29,24 @@ POS_EMBED_NORMALIZE="none"      # none | scene_bbox | fixed_scale
 ENCODER_TUNE="frozen"           # frozen | partial | full
 ENCODER_UNFREEZE_LAST_N="4"     # used when ENCODER_TUNE=partial
 
-if [ ! -e "${CKPT_PATH}" ]; then
-  echo "[ERROR] CKPT_PATH does not exist: ${CKPT_PATH}"
-  echo "        Point it at the trained best.pth directory (saved by save_state)."
+if [ ! -e "${STATE_DICT}" ]; then
+  echo "[ERROR] STATE_DICT does not exist: ${STATE_DICT}"
+  echo "        Point it at the consolidated model dir saved during training (best_model/final_model)."
+  echo "        For an older checkpoint without it, run: python <ckpt>/zero_to_fp32.py <ckpt> consolidated.pt"
   exit 1
 fi
 
-echo "[INFO] Testing checkpoint: ${CKPT_PATH}"
+echo "[INFO] Testing state_dict: ${STATE_DICT}"
 echo "[INFO] switches: vision=${USE_VISION} feature=${VISION_FEATURE} frame=${COORD_FRAME} pe=${POS_EMBED_ENABLED} norm=${POS_EMBED_NORMALIZE} encoder=${ENCODER_TUNE}"
 
-accelerate launch --config_file configs/accelerate/zero3_h100x4.yaml \
-  run.py \
+# Plain python, single GPU: inference needs no DeepSpeed/sharding (no optimizer state).
+python run.py \
   --config-path configs/finetune \
   --config-name sqa3d_llm.yaml \
-  num_gpu=4 \
+  num_gpu=1 \
   name="SQA3D_LLM" note="$NOTE" \
   mode=test \
-  +ckpt_path="$CKPT_PATH" \
+  +test_state_dict="$STATE_DICT" \
   eval.save=True \
   model.use_vision="$USE_VISION" \
   model.vision_feature="$VISION_FEATURE" \

@@ -221,6 +221,18 @@ class BaseTrainer():
         misc.make_dir(self.ckpt_path.parent)
         self.save_func(str(self.ckpt_path.parent / name))
 
+    def save_consolidated(self, name):
+        """Save a merged (ZeRO-3-gathered) model state_dict for easy eval/export.
+
+        Unlike save_state (full training state; sharded as zero_pp_rank_* files that accelerate
+        cannot reload for plain inference), this writes the consolidated model weights via
+        accelerator.save_model (safetensors). Load it later with +test_state_dict=<dir>, on any
+        #GPUs, without zero_to_fp32. Collective: every rank must call it under DeepSpeed.
+        """
+        out_dir = self.ckpt_path.parent / name
+        misc.make_dir(out_dir)
+        self.accelerator.save_model(self.model, str(out_dir))
+
     def resume(self):
         if self.ckpt_path.exists():
             print(f"Resuming from {str(self.ckpt_path)}")
