@@ -236,11 +236,23 @@ class BaseTrainer():
         a 'state_dict'/'module' key). Strips a leading 'module.' from keys, then loads with the
         same partition-aware path used for the pretrained encoder.
         """
-        sd_path = str(sd_path)
-        if not Path(sd_path).exists():
+        from safetensors.torch import load_file
+        p = Path(sd_path)
+        if not p.exists():
             raise FileNotFoundError(f"test_state_dict does not exist: {sd_path}")
-        if sd_path.endswith(".safetensors"):
-            from safetensors.torch import load_file
+
+        sd = {}
+        if p.is_dir():
+            # zero_to_fp32 may emit a folder of sharded safetensors / bins; merge them all.
+            files = sorted(glob.glob(str(p / "*.safetensors"))) or \
+                    sorted(glob.glob(str(p / "*.bin"))) or \
+                    sorted(glob.glob(str(p / "*.pt")))
+            if not files:
+                raise FileNotFoundError(f"No weight shards (*.safetensors/*.bin/*.pt) in {sd_path}")
+            for f in files:
+                part = load_file(f, device="cpu") if f.endswith(".safetensors") else torch.load(f, map_location="cpu")
+                sd.update(part)
+        elif sd_path.endswith(".safetensors"):
             sd = load_file(sd_path, device="cpu")
         else:
             sd = torch.load(sd_path, map_location="cpu")
