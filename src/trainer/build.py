@@ -152,9 +152,14 @@ class BaseTrainer():
         self.ckpt_path = Path(cfg.ckpt_path) if cfg.get("ckpt_path") else Path(cfg.exp_dir) / "ckpt" / "best.pth"
         if cfg.resume:
             self.resume()
+        elif self.mode == "test" and cfg.get("test_state_dict"):
+            # Robust evaluation path: load a CONSOLIDATED state_dict (e.g. produced by
+            # deepspeed's zero_to_fp32.py, or the gathered fp16 model). Avoids accelerate's
+            # deepspeed load_state, so it works regardless of the #GPUs used for training.
+            self._load_test_state_dict(cfg.test_state_dict)
         elif self.mode == "test" and cfg.get("ckpt_path"):
-            # Standalone evaluation: load a trained checkpoint directly, bypassing run.py's
-            # resume branch (which reloads the saved config.yaml and forces mode back to train).
+            # Standalone evaluation from an accelerate/deepspeed checkpoint directory, bypassing
+            # run.py's resume branch (which reloads the saved config.yaml and forces mode=train).
             if not self.ckpt_path.exists():
                 raise FileNotFoundError(f"test ckpt_path does not exist: {self.ckpt_path}")
             print(f"📂 Loading test checkpoint from: {self.ckpt_path}")
@@ -223,6 +228,30 @@ class BaseTrainer():
             print(f"Successfully resumed from {self.ckpt_path}")
         else:
             self.logger.info("training from scratch")
+
+    def _load_test_state_dict(self, sd_path):
+        """Load a consolidated full-model state_dict for evaluation (ZeRO-3-partition safe).
+
+        Accepts .safetensors, or a torch-saved .pt/.bin (optionally wrapping the weights under
+        a 'state_dict'/'module' key). Strips a leading 'module.' from keys, then loads with the
+        same partition-aware path used for the pretrained encoder.
+        """
+        sd_path = str(sd_path)
+        if not Path(sd_path).exists():
+            raise FileNotFoundError(f"test_state_dict does not exist: {sd_path}")
+        if sd_path.endswith(".safetensors"):
+            from safetensors.torch import load_file
+            sd = load_file(sd_path, device="cpu")
+        else:
+            sd = torch.load(sd_path, map_location="cpu")
+            if isinstance(sd, dict):
+                for key in ("state_dict", "module", "model"):
+                    if key in sd and isinstance(sd[key], dict):
+                        sd = sd[key]
+                        break
+        sd = {(k[len("module."):] if k.startswith("module.") else k): v for k, v in sd.items()}
+        print(f"📂 Loading test state_dict from: {sd_path} ({len(sd)} tensors)")
+        self._load_weights_into_model(sd)
 
     def load_pretrain(self):
         print(f"📂 Loading pretrained weights from: {str(self.pretrain_ckpt_path)}")
