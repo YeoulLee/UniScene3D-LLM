@@ -310,11 +310,22 @@ class BaseTrainer():
         value on rank 0, and let the context re-partition/broadcast on exit. Buffers are not
         partitioned and are copied directly. Without ZeRO-3 this falls back to load_state_dict.
         """
-        params = list(self.model.named_parameters())
+        # Use the UNWRAPPED model so param names match the checkpoint: after prepare the
+        # DeepSpeed/DDP wrapper adds a 'module.' prefix to named_parameters(), which would make
+        # every key miss the (unprefixed) consolidated checkpoint. unwrap_model is a no-op
+        # pre-prepare (used by load_pretrain during training).
+        model = self.accelerator.unwrap_model(self.model)
+        # Also tolerate a leading 'module.' on the checkpoint side.
+        weights = {(k[len("module."):] if k.startswith("module.") else k): v for k, v in weights.items()}
+
+        params = list(model.named_parameters())
         is_zero3 = any(hasattr(p, "ds_id") for _, p in params)
 
         if not is_zero3:
-            self.model.load_state_dict(weights, strict=False)
+            incompatible = model.load_state_dict(weights, strict=False)
+            n_missing = len(getattr(incompatible, "missing_keys", []))
+            print(f"📦 Loaded weights: {len(params) - n_missing}/{len(params)} params matched "
+                  f"({n_missing} missing).")
             return
 
         import deepspeed  # local import: only needed on the ZeRO-3 path
@@ -328,11 +339,17 @@ class BaseTrainer():
                 if self.accelerator.is_main_process:
                     p.data.copy_(weights[name].to(device=p.device, dtype=p.dtype))
         # Buffers (e.g. logit-scale-adjacent or non-persistent) are replicated, not sharded.
-        for name, b in self.model.named_buffers():
+        for name, b in model.named_buffers():
             if name in weights:
                 b.data.copy_(weights[name].to(device=b.device, dtype=b.dtype))
-        print(f"📦 ZeRO-3 partition-safe load: copied {len(params) - len(missing)} params "
+        copied = len(params) - len(missing)
+        print(f"📦 ZeRO-3 partition-safe load: copied {copied}/{len(params)} params "
               f"({len(missing)} not in checkpoint, left as-is).")
+        if copied == 0:
+            raise RuntimeError(
+                "Loaded 0 params — checkpoint keys do not match the model. Check that the "
+                "model switches match training and that the consolidated dir is correct."
+            )
 
     def save_func(self, path):
         self.accelerator.save_state(path)
