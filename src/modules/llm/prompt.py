@@ -46,8 +46,24 @@ def build_sqa3d_messages(situation: str, question: str, system_prompt: str = DEF
     ]
 
 
+def _render_chat(tokenizer, messages, add_generation_prompt, enable_thinking):
+    """Render a chat template to text. Qwen3 emits a long <think> reasoning block by default;
+    enable_thinking=False makes it answer directly (SQA3D wants a short answer). The kwarg is
+    ignored gracefully on tokenizers whose template does not support it."""
+    try:
+        return tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=add_generation_prompt,
+            enable_thinking=enable_thinking,
+        )
+    except TypeError:
+        return tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=add_generation_prompt,
+        )
+
+
 def build_input_and_labels(tokenizer, situation, question, answer=None,
-                           system_prompt=DEFAULT_SYSTEM_PROMPT, max_len=None):
+                           system_prompt=DEFAULT_SYSTEM_PROMPT, max_len=None,
+                           enable_thinking=False):
     """Tokenize one example into input_ids (+labels when an answer is given).
 
     Training (answer given): returns the full prompt+answer ids; labels mask everything
@@ -62,9 +78,8 @@ def build_input_and_labels(tokenizer, situation, question, answer=None,
     # Render the chat template to text first (version-robust), then tokenize. The template
     # already inserts special tokens, so add_special_tokens=False. The registered <scene>
     # special token is still recognized inside the rendered string and maps to its single id.
-    prompt_text = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True,
-    )
+    prompt_text = _render_chat(tokenizer, messages, add_generation_prompt=True,
+                               enable_thinking=enable_thinking)
     prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
 
     if answer is None:
@@ -72,9 +87,8 @@ def build_input_and_labels(tokenizer, situation, question, answer=None,
         labels = None
     else:
         full_messages = messages + [{"role": "assistant", "content": answer.strip()}]
-        full_text = tokenizer.apply_chat_template(
-            full_messages, tokenize=False, add_generation_prompt=False,
-        )
+        full_text = _render_chat(tokenizer, full_messages, add_generation_prompt=False,
+                                 enable_thinking=enable_thinking)
         full_ids = tokenizer(full_text, add_special_tokens=False)["input_ids"]
         input_ids = list(full_ids)
         # Supervise only the answer tokens (everything after the prompt prefix).

@@ -99,6 +99,7 @@ model:
     model_id: "Qwen/Qwen3.5-4B"
     max_txt_len: 256
     max_new_tokens: 32
+    enable_thinking: False        # Qwen3 thinking mode off -> short direct answers (SQA3D)
     torch_dtype: "bfloat16"
     attn_implementation: "sdpa"   # set "flash_attention_2" if installed
     gradient_checkpointing: True

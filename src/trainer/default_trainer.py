@@ -44,6 +44,8 @@ class DefaultTrainer(BaseTrainer):
                 log_dict = {'step': self.global_step}
                 log_dict.update(losses)
                 self.log(log_dict, mode="train")
+                # Show loss on the progress bar so it is visible even under hard_debug (no wandb).
+                pbar.set_postfix(loss=float(loss.detach().item()))
                 pbar.update(1)
 
     def _gather_for_metrics(self, data_dict):

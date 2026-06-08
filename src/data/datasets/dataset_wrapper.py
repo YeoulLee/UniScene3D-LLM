@@ -198,6 +198,7 @@ class ScanFamilyDatasetWrapperLLM(Dataset):
         self.tokenizer, self.scene_token_id = load_qwen_tokenizer(llm_cfg.get("model_id", "Qwen/Qwen3.5-4B"))
         self.max_txt_len = int(llm_cfg.get("max_txt_len", 256))
         self.system_prompt = llm_cfg.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
+        self.enable_thinking = bool(llm_cfg.get("enable_thinking", False))
         self.pad_token_id = self.tokenizer.pad_token_id
 
     def __len__(self):
@@ -232,6 +233,7 @@ class ScanFamilyDatasetWrapperLLM(Dataset):
             answer=answer,
             system_prompt=self.system_prompt,
             max_len=self.max_txt_len,
+            enable_thinking=self.enable_thinking,
         )
 
         out = {
