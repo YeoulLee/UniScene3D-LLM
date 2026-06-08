@@ -47,7 +47,14 @@ class QwenLLM(nn.Module):
             self.model = get_peft_model(self.model, peft_config)
 
         if gradient_checkpointing:
-            self.model.gradient_checkpointing_enable()
+            # use_reentrant=False: the reentrant checkpoint recomputes the forward and asserts
+            # tensor-metadata equality, which trips with LoRA (frozen base + adapters fed via
+            # inputs_embeds) -> "Recomputed value ... different metadata". Non-reentrant is robust.
+            try:
+                self.model.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False})
+            except TypeError:
+                self.model.gradient_checkpointing_enable()
             # LoRA + checkpointing: the frozen base needs input grads for backprop to flow.
             if self.use_lora and hasattr(self.model, "enable_input_require_grads"):
                 self.model.enable_input_require_grads()
