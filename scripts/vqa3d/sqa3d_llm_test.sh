@@ -44,7 +44,6 @@ accelerate launch --config_file configs/accelerate/zero3_h100x4.yaml \
   num_gpu=4 \
   name="SQA3D_LLM" note="$NOTE" \
   mode=test \
-  resume=True \
   +ckpt_path="$CKPT_PATH" \
   eval.save=True \
   model.use_vision="$USE_VISION" \

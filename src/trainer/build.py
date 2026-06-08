@@ -152,6 +152,13 @@ class BaseTrainer():
         self.ckpt_path = Path(cfg.ckpt_path) if cfg.get("ckpt_path") else Path(cfg.exp_dir) / "ckpt" / "best.pth"
         if cfg.resume:
             self.resume()
+        elif self.mode == "test" and cfg.get("ckpt_path"):
+            # Standalone evaluation: load a trained checkpoint directly, bypassing run.py's
+            # resume branch (which reloads the saved config.yaml and forces mode back to train).
+            if not self.ckpt_path.exists():
+                raise FileNotFoundError(f"test ckpt_path does not exist: {self.ckpt_path}")
+            print(f"📂 Loading test checkpoint from: {self.ckpt_path}")
+            self.accelerator.load_state(str(self.ckpt_path))
 
     def forward(self, data_dict):
         return self.model(data_dict)
