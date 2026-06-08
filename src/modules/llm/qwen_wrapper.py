@@ -17,7 +17,7 @@ class QwenLLM(nn.Module):
     """Causal Qwen LM that consumes interleaved text + projected scene tokens."""
 
     def __init__(self, model_id: str, torch_dtype=torch.bfloat16, attn_implementation=None,
-                 gradient_checkpointing=False):
+                 gradient_checkpointing=False, lora_cfg=None):
         super().__init__()
         self.model_id = model_id
         self.tokenizer, self.scene_token_id = load_qwen_tokenizer(model_id)
@@ -27,12 +27,30 @@ class QwenLLM(nn.Module):
             load_kwargs["attn_implementation"] = attn_implementation
         self.model = AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs)
 
-        # Account for the added <scene> token.
+        # Account for the added <scene> token (must happen before LoRA wraps the model).
         if len(self.tokenizer) != self.model.get_input_embeddings().weight.shape[0]:
             self.model.resize_token_embeddings(len(self.tokenizer))
 
+        # Optional LoRA: freeze the base LM and train only low-rank adapters.
+        self.use_lora = bool(lora_cfg and lora_cfg.get("enabled", False))
+        if self.use_lora:
+            from peft import LoraConfig, get_peft_model
+            peft_config = LoraConfig(
+                task_type="CAUSAL_LM",
+                r=int(lora_cfg.get("r", 16)),
+                lora_alpha=int(lora_cfg.get("alpha", 32)),
+                lora_dropout=float(lora_cfg.get("dropout", 0.05)),
+                bias="none",
+                target_modules=list(lora_cfg.get("target_modules",
+                    ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])),
+            )
+            self.model = get_peft_model(self.model, peft_config)
+
         if gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
+            # LoRA + checkpointing: the frozen base needs input grads for backprop to flow.
+            if self.use_lora and hasattr(self.model, "enable_input_require_grads"):
+                self.model.enable_input_require_grads()
             self.model.config.use_cache = False
 
     @property

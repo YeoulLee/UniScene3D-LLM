@@ -103,5 +103,11 @@ model:
     torch_dtype: "bfloat16"
     attn_implementation: "sdpa"   # set "flash_attention_2" if installed
     gradient_checkpointing: True
+    lora:
+      enabled: False              # True = LoRA (freeze base LM, train adapters); use a higher solver.lr (~1e-4)
+      r: 16
+      alpha: 32
+      dropout: 0.05
+      target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
   loss_list: ["lm_loss"]
   vis_loss_list: ["lm_loss"]

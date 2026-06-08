@@ -26,6 +26,7 @@ POS_EMBED_ENABLED="True"        # True | False
 POS_EMBED_NORMALIZE="none"      # none | scene_bbox | fixed_scale
 ENCODER_TUNE="frozen"           # frozen | partial | full
 ENCODER_UNFREEZE_LAST_N="4"     # used when ENCODER_TUNE=partial
+LORA_ENABLED="False"            # must match training (r/alpha/targets come from the yaml)
 
 if [ ! -e "${STATE_DICT}" ]; then
   echo "[ERROR] STATE_DICT does not exist: ${STATE_DICT}"

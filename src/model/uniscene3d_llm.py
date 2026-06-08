@@ -79,6 +79,7 @@ class UniScene3DLLM(BaseModel):
             torch_dtype=dtype,
             attn_implementation=llm_cfg.get("attn_implementation", None),
             gradient_checkpointing=bool(llm_cfg.get("gradient_checkpointing", False)),
+            lora_cfg=llm_cfg.get("lora", None),
         )
         # Expose the LLM config as `.config` so Accelerate/DeepSpeed can auto-fill ZeRO-3
         # bucket sizes from hidden_size (this wrapper otherwise has no .config).
@@ -215,8 +216,12 @@ class UniScene3DLLM(BaseModel):
         # flag an unused trainable parameter.
         for p in self.projector.parameters():
             p.requires_grad = self.use_vision
-        for p in self.llm.parameters():
-            p.requires_grad = True
+        # With LoRA, PEFT already froze the base LM and left only adapters trainable — don't
+        # override it (that would unfreeze the whole base = full fine-tune). Without LoRA, train
+        # the full LM.
+        if not self.llm.use_lora:
+            for p in self.llm.parameters():
+                p.requires_grad = True
 
     def sync_geo_embedding_from_patch_after_load(self):
         """No-op hook (only meaningful in pretrain mode); kept for BaseTrainer compatibility."""
