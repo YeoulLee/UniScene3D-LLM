@@ -275,7 +275,7 @@ class BaseTrainer():
                         break
         sd = {(k[len("module."):] if k.startswith("module.") else k): v for k, v in sd.items()}
         self.accelerator.print(f"📂 Loading test state_dict from: {sd_path} ({len(sd)} tensors)")
-        self._load_weights_into_model(sd)
+        self._load_weights_into_model(sd, require_trainable=True)
 
     def load_pretrain(self):
         self.accelerator.print(f"📂 Loading pretrained weights from: {str(self.pretrain_ckpt_path)}")
@@ -301,7 +301,7 @@ class BaseTrainer():
         if vision_model_keys and loaded_vision_model_keys == vision_model_keys:
             self.accelerator.print(f"✅ Entire UniScene3D vision encoder is loaded.")
 
-    def _load_weights_into_model(self, weights):
+    def _load_weights_into_model(self, weights, require_trainable=False):
         """Load a (full-shape) state dict, robust to DeepSpeed ZeRO-3 parameter partitioning.
 
         Under ZeRO-3 (zero.Init), params are sharded at construction so their local shape is
@@ -309,7 +309,14 @@ class BaseTrainer():
         case we gather each param with deepspeed.zero.GatheredParameters, copy the checkpoint
         value on rank 0, and let the context re-partition/broadcast on exit. Buffers are not
         partitioned and are copied directly. Without ZeRO-3 this falls back to load_state_dict.
+
+        require_trainable: raise if any TRAINABLE param is missing. Only the test/eval load sets
+        this (the consolidated checkpoint MUST contain the trained projector/LLM). load_pretrain
+        leaves it False, because the UniScene3D encoder checkpoint legitimately lacks the
+        projector/LLM (projector is fresh-init, the LLM comes from Qwen from_pretrained).
         """
+        from collections import Counter
+
         # Use the UNWRAPPED model so param names match the checkpoint: after prepare the
         # DeepSpeed/DDP wrapper adds a 'module.' prefix to named_parameters(), which would make
         # every key miss the (unprefixed) consolidated checkpoint. unwrap_model is a no-op
@@ -319,52 +326,46 @@ class BaseTrainer():
         weights = {(k[len("module."):] if k.startswith("module.") else k): v for k, v in weights.items()}
 
         params = list(model.named_parameters())
+        req_grad = {n: p.requires_grad for n, p in params}
         is_zero3 = any(hasattr(p, "ds_id") for _, p in params)
 
         if not is_zero3:
             incompatible = model.load_state_dict(weights, strict=False)
-            n_missing = len(getattr(incompatible, "missing_keys", []))
-            self.accelerator.print(f"📦 Loaded weights: {len(params) - n_missing}/{len(params)} "
-                                   f"params matched ({n_missing} missing).")
-            return
+            missing = list(getattr(incompatible, "missing_keys", []))
+        else:
+            import deepspeed  # local import: only needed on the ZeRO-3 path
+            missing = []
+            for name, p in params:
+                if name not in weights:
+                    missing.append(name)
+                    continue
+                with deepspeed.zero.GatheredParameters([p], modifier_rank=0):
+                    if self.accelerator.is_main_process:
+                        p.data.copy_(weights[name].to(device=p.device, dtype=p.dtype))
+            # Buffers (e.g. non-persistent) are replicated, not sharded.
+            for name, b in model.named_buffers():
+                if name in weights:
+                    b.data.copy_(weights[name].to(device=b.device, dtype=b.dtype))
 
-        import deepspeed  # local import: only needed on the ZeRO-3 path
-        from collections import Counter
-
-        missing, missing_trainable = [], []
-        for name, p in params:
-            if name not in weights:
-                missing.append(name)
-                if p.requires_grad:
-                    missing_trainable.append(name)
-                continue
-            with deepspeed.zero.GatheredParameters([p], modifier_rank=0):
-                if self.accelerator.is_main_process:
-                    p.data.copy_(weights[name].to(device=p.device, dtype=p.dtype))
-        # Buffers (e.g. logit-scale-adjacent or non-persistent) are replicated, not sharded.
-        for name, b in model.named_buffers():
-            if name in weights:
-                b.data.copy_(weights[name].to(device=b.device, dtype=b.dtype))
         copied = len(params) - len(missing)
-        self.accelerator.print(f"📦 ZeRO-3 partition-safe load: copied {copied}/{len(params)} "
-                               f"params ({len(missing)} not in checkpoint, left as-is).")
+        self.accelerator.print(f"📦 load: copied {copied}/{len(params)} params "
+                               f"({len(missing)} not in checkpoint, left as-is).")
         if missing:
-            by_module = Counter(n.split(".")[0] for n in missing)
-            self.accelerator.print(f"   missing by module: {dict(by_module)}")
+            self.accelerator.print(f"   missing by module: {dict(Counter(n.split('.')[0] for n in missing))}")
         if copied == 0:
             raise RuntimeError(
                 "Loaded 0 params — checkpoint keys do not match the model. Check that the "
-                "model switches match training and that the consolidated dir is correct."
+                "model switches match training and that the checkpoint dir is correct."
             )
-        if missing_trainable:
-            # Trainable params (projector/LLM) MUST come from the checkpoint; frozen pm_encoder
-            # is fine to miss here (it is restored by load_pretrain).
-            by_mod = Counter(n.split(".")[0] for n in missing_trainable)
-            raise RuntimeError(
-                f"{len(missing_trainable)} TRAINABLE params missing from the checkpoint "
-                f"{dict(by_mod)} — eval would use untrained weights. The consolidated checkpoint "
-                "likely does not contain the trained projector/LLM weights."
-            )
+        if require_trainable:
+            missing_trainable = [n for n in missing if req_grad.get(n, False)]
+            if missing_trainable:
+                by_mod = Counter(n.split(".")[0] for n in missing_trainable)
+                raise RuntimeError(
+                    f"{len(missing_trainable)} TRAINABLE params missing from the checkpoint "
+                    f"{dict(by_mod)} — eval would use untrained weights. The consolidated "
+                    "checkpoint likely lacks the trained projector/LLM weights."
+                )
 
     def save_func(self, path):
         self.accelerator.save_state(path)
